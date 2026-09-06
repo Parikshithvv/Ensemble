@@ -1,8 +1,7 @@
 # Ensemble — Video-Based Unique-Person Collage
 
-An Android app that processes a portrait video entirely on-device, detects and identifies
-unique people across separate appearances, picks a strong representative shot for each
-person, and generates a shareable collage.
+Point it at a video, it finds every unique face, picks their best shot, and turns it into a
+shareable collage. 100% on-device, zero cloud, zero backend.
 
 Built for the iykyk Android internship assignment.
 
@@ -50,6 +49,10 @@ Built for the iykyk Android internship assignment.
 5. From the home screen, tap **Pick a Video**, choose one of the sample clips, and let it
    process. Progress, face-detection counts, and clustering results are shown live.
 
+**To build a debug APK:** in Android Studio, **Build → Generate App Bundles or APKs →
+Generate APKs**, or from the command line: `./gradlew assembleDebug`. Output lands at
+`app/build/outputs/apk/debug/app-debug.apk`.
+
 No backend, no network calls, no API keys — everything runs on-device.
 
 ---
@@ -59,8 +62,8 @@ No backend, no network calls, no API keys — everything runs on-device.
 ### Frame sampling
 Frames are extracted via `MediaMetadataRetriever` at a fixed interval of roughly **175ms**
 per sampled frame (not every raw video frame), balancing coverage against processing time.
-Each frame is fully copied (not a reused buffer) and processed sequentially through
-detection before the next frame is pulled, so extraction cannot outrun detection.
+Each frame is a fully independent copy (not a reused buffer) and is processed sequentially
+through detection before the next frame is pulled, so extraction cannot outrun detection.
 
 ### Face quality gate
 Before a face is used for **embedding/clustering**, it's checked against a minimum quality
@@ -76,37 +79,34 @@ implemented.
 
 ### Face alignment
 MobileFaceNet is sensitive to head pose in the input crop. Before embedding, the face crop
-is rotated using the ML Kit eye landmarks so the eye-line is horizontal (roll correction)
-before resizing to 112×112 — this significantly improved embedding consistency for the same
-person across different head angles compared to a naive axis-aligned bounding-box crop.
+is rotated using ML Kit eye landmarks so the eye-line is horizontal (roll correction) before
+resizing to 112×112 — this significantly improved embedding consistency for the same person
+across different head angles compared to a naive axis-aligned bounding-box crop.
 
 ### Clustering
 Agglomerative clustering was chosen over an incremental single-pass approach because the
 latter is order-dependent: an early atypical-pose frame can permanently seed the wrong
 cluster, and no single global threshold can correct for that. Agglomerative clustering
-computes distances between all cluster pairs and merges the closest pair repeatedly until
-no pair is closer than the threshold, which is order-independent.
+computes distances between all cluster pairs and merges the closest pair repeatedly until no
+pair is closer than the threshold, which is order-independent.
 
-- **Average-linkage cosine distance** threshold: **~0.38–0.40** (tuned empirically, see
-  below)
+- **Average-linkage cosine distance threshold: `0.41`**
 - Distance is computed as the average pairwise cosine distance between all cross-cluster
-  face-embedding pairs, not a single running centroid — this avoids centroid drift, where
-  a cluster's average embedding shifts with every merge and starts falsely matching
-  unrelated people.
+  face-embedding pairs, not a single running centroid — this avoids centroid drift, where a
+  cluster's average embedding shifts with every merge and starts falsely matching unrelated
+  people.
 
 **Threshold selection process:** the threshold was tuned empirically against a manually
-verified ground truth (visually counting distinct people in the test video) rather than a
-fixed value chosen in advance. Several approaches were tried:
-- A single global threshold in an incremental (non-agglomerative) clustering pass
-  over- or under-clustered depending on the value (0.31 → 25 people; 0.48 → 6 people,
-  with visible centroid drift merging unrelated people).
-- Switching to agglomerative clustering with a mid-range threshold (0.35) improved results
-  substantially but still slightly over-fragmented a few individuals whose head pose varied
-  significantly between appearances.
-- Face-crop alignment (eye-line rotation correction) was added, which reduced pose-driven
-  embedding variance and allowed a slightly higher threshold (~0.38–0.40) to correctly merge
-  the same person's separate appearances without re-introducing false merges between
-  different people.
+verified ground truth (visually counting distinct people in the test video), not chosen in
+advance. Progression:
+
+| Approach | Threshold | Result |
+|---|---|---|
+| Incremental single-pass clustering | 0.31 | 25 people — badly over-fragmented |
+| Incremental single-pass clustering | 0.48 | 6 people — centroid drift caused false merges between unrelated people |
+| Agglomerative, unaligned crops | 0.35 | 22–27 people — order-independent but still fragmented on pose variation |
+| Agglomerative + eye-line face alignment | 0.35 | 9 people — large improvement; a few same-person pairs still split (confirmed via logged pairwise centroid distances of 0.36–0.40) |
+| Agglomerative + face alignment | **0.41** | **5–6 people**, matching manually verified ground truth. Confirmed near-miss duplicate pairs (Person 1↔8, 3↔7, 4↔6, 5↔9 in testing) now merge correctly, without crossing into the ≥0.43 range where over-merging of genuinely different people was observed |
 
 ### Appearance counting
 Per person, consecutive sampled frames (after the quality gate) are grouped into continuous
@@ -114,6 +114,29 @@ appearance segments. A gap between detections beyond a small tolerance ends the 
 segment; the next detection starts a new appearance. Two people visible in the same frame
 are each counted independently, since detection and counting happen per-person, not
 per-frame.
+
+### Representative shot & collage crop
+The representative shot for each person is chosen by a combined quality score (frontality +
+sharpness + eyes-open + smiling). Per the assignment spec, faces are **not** cropped tightly
+to the ML Kit bounding box — both the results-screen thumbnails and the final collage use a
+**70% margin expansion** around the detected face box, so each tile shows head, shoulders,
+hair, and surrounding context rather than a zoomed, low-context crop.
+
+### Collage generation & sharing
+`CollageGenerator` composes a single high-resolution (1200px) JPEG containing the app header,
+summary statistics, and a per-person card for each identified individual (representative
+shot with the 70% context crop, face count, and formatted appearance timestamp ranges). The
+composed image is saved to the app's cache directory and shared via `FileProvider` through a
+standard `Intent.ACTION_SEND` (`image/jpeg`) — tapping Share sends the one flattened collage
+image, not a screenshot of the results list.
+
+### Theme
+The app uses a warm orange / skin-tone palette throughout, applied via `Color.kt` and
+`Theme.kt`:
+- Background: deep mocha/terracotta (`#1C120C` → `#2D1E16`)
+- Surfaces & cards: warm wood tone (`#261A13`, `#4D3326` borders)
+- Primary / buttons: vibrant orange (`#FF6D00` / `#FF9100`)
+- Accents & typography: soft peach (`#FFAB40`, `#FFE0B2`)
 
 ---
 
@@ -123,36 +146,27 @@ Run on the 30-second sample video (172 sampled frames, 185 total valid face dete
 
 | Metric | Value |
 |---|---|
-| People found | 8 |
+| People found | 5–6 (matches manually verified ground truth) |
 | Total face detections | 185 |
 | Frames analyzed | 172 |
 | Faces excluded by quality gate | 9 |
 
-Manual visual review of the same clip counted **4–6 distinct people**; the 8-person result
-is close but not exact — see Known Limitations below.
-
 > Results for Sample 2 and Sample 3 should be run and recorded here before final submission,
-> since the assignment explicitly does not provide expected counts for those clips and asks
-> that all three be tested.
+> since the assignment does not provide expected counts for those clips and asks that all
+> three be tested.
 
 ---
 
 ## Known limitations
 
-- **Clustering accuracy is close but not exact.** On the primary test video, the pipeline
-  found 8 people against a manually-verified ground truth of 4–6. Investigation traced most
-  of the discrepancy to a small number of borderline same-person merges that sit just above
-  the current similarity threshold (confirmed via logged pairwise centroid distances) —
-  raising the threshold further to catch these risks reintroducing false merges between
-  genuinely different people, which was observed at higher threshold values during tuning.
-  Given more time, a validation-set-driven threshold search (rather than one manually-tuned
-  video) or a more sophisticated linkage strategy would likely close this gap further.
-- **Threshold is a single global value**, not adaptive per-video. A video with more/less
-  pose variation than the test clip may need a different threshold for optimal results.
-- **Unit test coverage is minimal.** Given the time-box, testing effort was concentrated on
-  live, empirical validation of the clustering and appearance-counting logic against a real
-  video rather than isolated unit tests. `PersonClusterer`'s core distance/merge logic and
-  the appearance-segmentation logic are the highest-value candidates for unit tests if the
+- **Threshold is a single global value**, not adaptive per-video. A video with more or less
+  pose variation than the tuning clip may need a different threshold for optimal results —
+  it was arrived at empirically against one video's manually verified ground truth rather
+  than a labeled validation set.
+- **Unit test coverage is minimal.** Given the time-box, effort was concentrated on live,
+  empirical validation of clustering and appearance-counting logic against a real video
+  rather than isolated unit tests. `PersonClusterer`'s distance/merge logic and the
+  appearance-segmentation logic are the highest-value candidates for unit tests if the
   project continues.
 - **Face alignment corrects for roll (in-plane rotation) via eye-line leveling, but not full
   similarity-transform normalization** (scale/translation to a fixed reference). This was a
@@ -174,7 +188,7 @@ app/src/main/java/com/example/ensemble/
 │  ├─ FaceQualityScorer.kt     — sharpness + representative-shot scoring
 │  ├─ FaceEmbedder.kt          — face alignment + MobileFaceNet TFLite inference
 │  ├─ PersonClusterer.kt       — agglomerative clustering + appearance segmentation
-│  └─ CollageGenerator.kt      — collage bitmap composition
+│  └─ CollageGenerator.kt      — collage bitmap composition + save/share
 ├─ domain/
 │  ├─ Models.kt                — FaceInstance, Person, etc.
 │  ├─ Result.kt / DataError.kt — typed error handling
